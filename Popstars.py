@@ -1,13 +1,41 @@
-import pygame
+import os
 import random
 import sys
 import math
-from sound_manager import play_explode_sound, explode_manager
-import pygame.mixer
-explode_sound = pygame.mixer.Sound("explode.mp3")  # 同路径加载
+import pygame
 
+# 检查音效文件是否存在
+if not os.path.exists("explode.mp3"):
+    raise FileNotFoundError("explode.mp3 文件未找到，请确保文件存在且路径正确。")
+
+pygame.mixer.init()
+explode_sound = pygame.mixer.Sound("explode.mp3")
+explode_sound.set_volume(0.5)  # 设置音量为 50%
+
+class ExplodeSoundManager:
+    def __init__(self):
+        self.count = 0  # 剩余需要播放的爆炸音效数
+        self.delay = 100  # 毫秒
+        self.last_play_time = 0
+
+    def trigger(self, count):
+        self.count += count
+        self.last_play_time = pygame.time.get_ticks() - self.delay  # 立刻开始播放
+
+    def update(self):
+        now = pygame.time.get_ticks()
+        if self.count > 0 and now - self.last_play_time >= self.delay:
+            explode_sound.play()
+            self.count -= 1
+            self.last_play_time = now
+
+explode_manager = ExplodeSoundManager()
+
+def play_explode_sound(count):
+    explode_manager.trigger(count)
+
+# 初始化 Pygame
 pygame.init()
-
 particles = []
 
 def draw_star(surface, fill_color, border_color, center, radius):
@@ -23,11 +51,17 @@ def draw_star(surface, fill_color, border_color, center, radius):
     shadow_surf = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
     shadow_points = [(x + 1.5, y + 1.5) for (x, y) in points]
     pygame.draw.polygon(shadow_surf, (0, 0, 0, 60), shadow_points)
-    surface.blit(shadow_surf, (0,0))
+    surface.blit(shadow_surf, (0, 0))
 
     pygame.draw.polygon(surface, border_color, points)
     pygame.draw.polygon(surface, fill_color, points, width=0)
 
+# 爆炸粒子生成函数
+def explode(x, y, color):
+    new_particles = []
+    for _ in range(20):  # 生成20个粒子
+        new_particles.append(Particle(x, y, color))
+    return new_particles
 
 WIDTH, HEIGHT = 400, 500
 ROWS, COLS = 10, 10
@@ -103,7 +137,6 @@ class Star:
             else:
                 self.row += self.fall_speed
 
-
 class Particle:
     def __init__(self, x, y, color):
         self.x = x
@@ -126,14 +159,14 @@ class Particle:
 
 def create_grid():
     return [[Star(r, c, random.randint(0, 4)) for c in range(COLS)] for r in range(ROWS)]
-# 判断还有没有要消除的代码
+
 def has_removable(grid):
     for r in range(ROWS):
         for c in range(COLS):
             if grid[r][c].removed:
                 continue
             color_index = grid[r][c].color_index
-            for dr, dc in [(1,0), (0,1)]:  # 只检查下和右方向（避免重复）
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:  # 检查上下左右
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < ROWS and 0 <= nc < COLS:
                     if not grid[nr][nc].removed and grid[nr][nc].color_index == color_index:
@@ -143,62 +176,48 @@ def has_removable(grid):
 def get_connected(grid, r, c, color_index, visited):
     if r < 0 or r >= ROWS or c < 0 or c >= COLS:
         return []
-    if (r, c) in visited or grid[int(r)][c].removed or grid[int(r)][c].color_index != color_index:
+    if (r, c) in visited or grid[r][c].removed or grid[r][c].color_index != color_index:
         return []
 
     visited.add((r, c))
     connected = [(r, c)]
-    for dr, dc in [(-1,0), (1,0), (0,-1), (0,1)]:
-        connected += get_connected(grid, r+dr, c+dc, color_index, visited)
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        connected += get_connected(grid, r + dr, c + dc, color_index, visited)
     return connected
-# 生成爆炸粒子
-def explode(x, y, color):
-    new_particles = []
-    for _ in range(20):
-        new_particles.append(Particle(x, y, color))
-    return new_particles
-# 爆炸所有
+
+def explode_star(star, particles):
+    if not star.removed:
+        x = star.col * STAR_SIZE + STAR_SIZE // 2
+        y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
+        particles.extend(explode(x, y, STAR_COLORS[star.color_index][0]))
+        star.removed = True
+
 def explode_all_stars(grid, particles):
     for row in grid:
         for star in row:
-            if not star.removed:
-                x = star.col * STAR_SIZE + STAR_SIZE // 2
-                y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
-                particles.extend(explode(x, y, STAR_COLORS[star.color_index][0]))
-                star.removed = True
-# 爆炸列
+            explode_star(star, particles)
+
 def explode_column(grid, col, particles):
     for r in range(ROWS):
-        star = grid[r][col]
-        if not star.removed:
-            x = star.col * STAR_SIZE + STAR_SIZE // 2
-            y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
-            particles.extend(explode(x, y, STAR_COLORS[star.color_index][0]))
-            star.removed = True
+        explode_star(grid[r][col], particles)
 
 def remove_stars(grid, connected, particles):
     for r, c in connected:
-        star = grid[int(r)][c]
-        if not star.removed:
-            star.removed = True
-            x = star.col * STAR_SIZE + STAR_SIZE // 2
-            y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
-            particles.extend(explode(x, y, STAR_COLORS[star.color_index][0]))
+        star = grid[r][c]
+        explode_star(star, particles)
 
 def collapse(grid):
     for c in range(COLS):
-        non_removed = [grid[int(r)][c] for r in range(ROWS) if not grid[int(r)][c].removed]
+        non_removed = [grid[r][c] for r in range(ROWS) if not grid[r][c].removed]
         for i in range(ROWS - 1, -1, -1):
             if non_removed:
                 star = non_removed.pop()
                 target_row = i
                 star.fall_target = float(target_row)
                 star.falling = True
-                # 计算速度，确保向下移动
                 distance = star.fall_target - star.row
                 star.fall_speed = distance / 10.0 if distance > 0 else 0
                 grid[i][c] = star
-                star.col = c
             else:
                 grid[i][c] = Star(float(i), c, random.randint(0, 4))
                 grid[i][c].removed = True
@@ -269,10 +288,9 @@ def main():
                             score += len(connected) ** 2
                             removing = True
                             remove_timer = 10
-                            play_explode_sound(len(connected))  # ★ 正确播放
-                            # 注意这里只设置播放事件，update在循环后执行
+                            play_explode_sound(len(connected))  # 触发音效
 
-        # ★★★ 正确位置：每帧都执行，事件处理之后！！！
+        # 更新爆炸管理器
         explode_manager.update()
 
         if removing:
@@ -282,18 +300,21 @@ def main():
                 shift_left(grid)
                 removing = False
 
-        # 绘制星星
+        # 更新星星
         for row in grid:
             for star in row:
                 star.update()
                 star.draw(SCREEN)
 
         # 更新粒子
-        for p in particles[:]:
+        to_remove = []
+        for p in particles:
             p.update()
             p.draw(SCREEN)
             if p.life <= 0 or p.radius <= 0:
-                particles.remove(p)
+                to_remove.append(p)
+        for p in to_remove:
+            particles.remove(p)
 
         # 爆炸列动画逻辑
         if not removing and not has_removable(grid) and len(particles) == 0:
@@ -314,7 +335,6 @@ def main():
                     removing = False
 
         pygame.display.flip()
-
 
 if __name__ == "__main__":
     main()
