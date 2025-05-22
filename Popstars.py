@@ -252,6 +252,10 @@ def main():
                     grid = create_grid()
                     score = 0
                     particles.clear()
+                    removing = False
+                    remove_timer = 0
+                    exploding_cols = None
+                    exploding_timer = 0
                     continue
 
                 c = x // STAR_SIZE
