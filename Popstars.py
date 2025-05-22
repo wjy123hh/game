@@ -57,10 +57,22 @@ def draw_star(surface, fill_color, border_color, center, radius):
     pygame.draw.polygon(surface, fill_color, points, width=0)
 
 # 爆炸粒子生成函数
-def explode(x, y, color):
+def explode(x, y, color, num_stars):
     new_particles = []
-    for _ in range(20):  # 生成20个粒子
-        new_particles.append(Particle(x, y, color))
+    # 动态调整粒子数量
+    num_particles = int(5 * num_stars)  # 消灭的星星越多，生成的粒子越多
+    # 动态调整粒子的生成范围，最大为整个游戏区域的1/3
+    max_range_x = min(STAR_SIZE * num_stars, WIDTH / 3)
+    max_range_y = min(STAR_SIZE * num_stars, HEIGHT / 3)
+
+    for _ in range(num_particles):
+        # 随机生成粒子的初始位置
+        particle_x = random.uniform(x - max_range_x, x + max_range_x)
+        particle_y = random.uniform(y - max_range_y, y + max_range_y)
+        # 随机生成粒子的初始速度
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(2 + num_stars, 6 + num_stars)  # 消灭的星星越多，速度范围越大
+        new_particles.append(Particle(particle_x, particle_y, color, angle, speed))
     return new_particles
 
 WIDTH, HEIGHT = 400, 500
@@ -138,23 +150,26 @@ class Star:
                 self.row += self.fall_speed
 
 class Particle:
-    def __init__(self, x, y, color):
+    def __init__(self, x, y, color, angle, speed):
         self.x = x
         self.y = y
         self.color = color
-        self.radius = 4
-        self.life = 30
-        self.angle = random.uniform(0, 2 * math.pi)
-        self.speed = random.uniform(2, 5)
+        self.radius = random.uniform(3, 6)  # 随机初始大小
+        self.life = random.uniform(40, 60)  # 随机生命周期
+        self.angle = angle
+        self.speed = speed
+        self.fade_rate = random.uniform(0.05, 0.1)  # 随机褪色速度
 
     def update(self):
         self.x += self.speed * math.cos(self.angle)
         self.y += self.speed * math.sin(self.angle)
         self.life -= 1
-        self.radius = max(0, int(self.radius - 0.13))
+        self.radius -= self.fade_rate  # 逐渐减小粒子大小
+        if self.life <= 0 or self.radius <= 0:
+            self.radius = 0
 
     def draw(self, surface):
-        if self.radius > 0 and self.life > 0:
+        if self.radius > 0:
             pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), int(self.radius))
 
 def create_grid():
@@ -185,11 +200,11 @@ def get_connected(grid, r, c, color_index, visited):
         connected += get_connected(grid, r + dr, c + dc, color_index, visited)
     return connected
 
-def explode_star(star, particles):
+def explode_star(star, particles, num_stars):
     if not star.removed:
         x = star.col * STAR_SIZE + STAR_SIZE // 2
         y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
-        particles.extend(explode(x, y, STAR_COLORS[star.color_index][0]))
+        particles.extend(explode(x, y, STAR_COLORS[star.color_index][0], num_stars))
         star.removed = True
 
 def explode_all_stars(grid, particles):
@@ -198,13 +213,24 @@ def explode_all_stars(grid, particles):
             explode_star(star, particles)
 
 def explode_column(grid, col, particles):
+    num_stars = sum(1 for r in range(ROWS) if not grid[r][col].removed)
     for r in range(ROWS):
-        explode_star(grid[r][col], particles)
+        star = grid[r][col]
+        if not star.removed:
+            x = star.col * STAR_SIZE + STAR_SIZE // 2
+            y = int(star.row) * STAR_SIZE + TOP_MARGIN + STAR_SIZE // 2
+            particles.extend(explode(x, y, STAR_COLORS[star.color_index][0], num_stars))
+            star.removed = True
+    play_explode_sound(num_stars)  # 播放音效
 
 def remove_stars(grid, connected, particles):
+    num_stars = len(connected)
     for r, c in connected:
         star = grid[r][c]
-        explode_star(star, particles)
+        explode_star(star, particles, num_stars)
+    for r, c in connected:
+        grid[r][c].removed = True
+    return num_stars  # 返回消除的星星数量
 
 def collapse(grid):
     for c in range(COLS):
@@ -252,8 +278,10 @@ def main():
     score = 0
     removing = False
     remove_timer = 0
-    exploding_cols = None  # 当前爆炸的列索引，None表示不爆炸
-    exploding_timer = 0  # 计时器，用于列与列之间的延迟
+    auto_explode = False  # 是否进入自动爆炸模式
+    exploding_col = None  # 当前正在爆炸的列索引
+    exploding_timer = 0  # 列爆炸的计时器
+    no_more_removable = False  # 是否还有可以消除的星星
 
     while True:
         CLOCK.tick(FPS)
@@ -268,13 +296,15 @@ def main():
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 x, y = event.pos
                 if WIDTH - 120 <= x <= WIDTH - 20 and 20 <= y <= 56:
+                    # 重置游戏状态
                     grid = create_grid()
                     score = 0
                     particles.clear()
                     removing = False
-                    remove_timer = 0
-                    exploding_cols = None
+                    auto_explode = False
+                    exploding_col = None
                     exploding_timer = 0
+                    no_more_removable = False
                     continue
 
                 c = x // STAR_SIZE
@@ -284,11 +314,12 @@ def main():
                     if not star.removed:
                         connected = get_connected(grid, r, c, star.color_index, set())
                         if len(connected) >= 2:
-                            remove_stars(grid, connected, particles)
-                            score += len(connected) ** 2
+                            num_stars = remove_stars(grid, connected, particles)
+                            score += num_stars ** 2
                             removing = True
                             remove_timer = 10
-                            play_explode_sound(len(connected))  # 触发音效
+                            play_explode_sound(num_stars)  # 触发音效
+                            no_more_removable = False  # 重置标志位
 
         # 更新爆炸管理器
         explode_manager.update()
@@ -299,6 +330,25 @@ def main():
                 collapse(grid)
                 shift_left(grid)
                 removing = False
+                if not has_removable(grid):  # 检查是否还有可以消除的星星
+                    no_more_removable = True
+
+        # 自动爆炸逻辑
+        if no_more_removable and not removing and not auto_explode:
+            auto_explode = True  # 启动自动爆炸模式
+            exploding_col = COLS - 1  # 从最右边的列开始
+            exploding_timer = 0
+
+        if auto_explode and not removing:
+            exploding_timer += 1
+            if exploding_timer >= 20:  # 每列爆炸的间隔时间
+                if exploding_col >= 0:
+                    explode_column(grid, exploding_col, particles)
+                    exploding_col -= 1  # 移动到下一列
+                    exploding_timer = 0
+                else:
+                    auto_explode = False  # 退出自动爆炸模式
+                    exploding_col = None  # 重置列索引
 
         # 更新星星
         for row in grid:
@@ -315,24 +365,6 @@ def main():
                 to_remove.append(p)
         for p in to_remove:
             particles.remove(p)
-
-        # 爆炸列动画逻辑
-        if not removing and not has_removable(grid) and len(particles) == 0:
-            if exploding_cols is None:
-                exploding_cols = COLS - 1
-                exploding_timer = 0
-
-        if exploding_cols is not None:
-            exploding_timer += 1
-            if exploding_timer >= 20:
-                explode_column(grid, exploding_cols, particles)
-                exploding_cols -= 1
-                exploding_timer = 0
-                if exploding_cols < 0:
-                    collapse(grid)
-                    shift_left(grid)
-                    exploding_cols = None
-                    removing = False
 
         pygame.display.flip()
 
